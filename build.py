@@ -706,6 +706,16 @@ def openai_vision_analyze(filepath, model="gpt-4o", api_key="", language="en", p
         resp = urllib.request.urlopen(req, timeout=300, context=ctx)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
+        if "Cannot read image" in body or "does not support image" in body:
+            raise ValueError(
+                f"Model '{model}' cannot read images!\n\n"
+                f"Your API key may lack access to '{model}'.\n\n"
+                f"Fix: Use a different model:\n"
+                f"  - gpt-4o-mini (cheapest vision model)\n"
+                f"  - gpt-4o (best quality)\n\n"
+                f"Or switch to Ollama/Gemini provider.\n\n"
+                f"Click 'Fetch' to see available models."
+            )
         raise ConnectionError(f"OpenAI API error {e.code}: {body[:300]}")
     except Exception as e:
         raise ConnectionError(f"OpenAI request failed: {e}")
@@ -1501,6 +1511,14 @@ class MainWindow(QMainWindow):
         self.btn_check_update.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.btn_check_update.customContextMenuRequested.connect(self._update_settings)
         self.status_bar.addPermanentWidget(self.btn_check_update)
+        self.btn_push_update = QPushButton("Push Update")
+        self.btn_push_update.setFlat(True)
+        self.btn_push_update.setStyleSheet(
+            "QPushButton{color:#8080a0;font-size:11px;border:none;padding:0 4px;}"
+            "QPushButton:hover{color:#66BB6A;text-decoration:underline;}"
+        )
+        self.btn_push_update.clicked.connect(self._push_update)
+        self.status_bar.addPermanentWidget(self.btn_push_update)
 
         if self.dark_mode:
             self._toggle_dark(2)
@@ -1696,6 +1714,146 @@ class MainWindow(QMainWindow):
             self.presets["github_token"] = inp_token.text().strip()
             save_presets_to_file(self.presets)
             self.status_bar.showMessage("Update settings saved!", 3000)
+
+    def _push_update(self):
+        repo = self.presets.get("update_repo", UPDATE_REPO).strip()
+        token = self.presets.get("github_token", "").strip()
+        if not repo:
+            QMessageBox.warning(self, "Warning", "No repo configured!\nRight-click 'Check Update' to set up.")
+            return
+        if not token:
+            QMessageBox.warning(self, "Warning", "No GitHub token!\nRight-click 'Check Update' to add token.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Push Update to GitHub")
+        dlg.setMinimumWidth(400)
+        dlg.setStyleSheet(self.styleSheet())
+        layout = QFormLayout(dlg)
+        inp_version = QLineEdit(APP_VERSION)
+        inp_version.setPlaceholderText("e.g. 1.1.0")
+        inp_date = QLineEdit(datetime.now().strftime("%Y-%m-%d"))
+        inp_changelog = QLineEdit()
+        inp_changelog.setPlaceholderText("What changed in this version?")
+        layout.addRow("New version:", inp_version)
+        layout.addRow("Date:", inp_date)
+        layout.addRow("Changelog:", inp_changelog)
+        btn_box = QHBoxLayout()
+        btn_push = QPushButton("  Push  ")
+        btn_cancel = QPushButton("  Cancel  ")
+        btn_push.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_box.addWidget(btn_push)
+        btn_box.addWidget(btn_cancel)
+        layout.addRow("", btn_box)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_ver = inp_version.text().strip()
+        new_date = inp_date.text().strip()
+        changelog = inp_changelog.text().strip()
+        if not new_ver:
+            QMessageBox.warning(self, "Warning", "Version cannot be empty!")
+            return
+        self.btn_push_update.setEnabled(False)
+        self.btn_push_update.setText("Pushing...")
+        self.status_bar.showMessage("Pushing update to GitHub...")
+        QApplication.processEvents()
+        try:
+            ctx = None
+            try:
+                ctx = ssl.create_default_context()
+            except Exception:
+                ctx = ssl._create_unverified_context()
+            headers = {
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "StockTagger",
+            }
+            api_base = f"https://api.github.com/repos/{repo}/contents"
+
+            version_data = json.dumps({
+                "version": new_ver,
+                "date": new_date,
+                "changelog": changelog,
+                "download_url": "",
+            }, indent=2).encode("utf-8")
+
+            import base64 as b64mod
+            version_b64 = b64mod.b64encode(version_data).decode("utf-8")
+
+            version_sha = None
+            try:
+                sha_resp = urllib.request.urlopen(
+                    urllib.request.Request(f"{api_base}/version.json", headers=headers),
+                    timeout=15, context=ctx
+                )
+                version_sha = json.loads(sha_resp.read().decode())["sha"]
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    raise ConnectionError(f"Failed to get version.json SHA ({e.code}): {e.read().decode('utf-8', errors='replace')[:300]}")
+            except Exception:
+                pass
+
+            payload_v = {"message": f"Update to v{new_ver}", "content": version_b64}
+            if version_sha:
+                payload_v["sha"] = version_sha
+            req = urllib.request.Request(
+                f"{api_base}/version.json",
+                data=json.dumps(payload_v).encode("utf-8"),
+                headers={**headers, "Content-Type": "application/json"},
+                method="PUT",
+            )
+            try:
+                resp = urllib.request.urlopen(req, timeout=30, context=ctx)
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
+                raise ConnectionError(f"version.json push failed ({e.code}): {body[:500]}")
+
+            script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+            if getattr(sys, 'frozen', False):
+                script_dir = os.path.dirname(sys.executable)
+            build_path = os.path.join(script_dir, "build.py")
+            with open(build_path, "r", encoding="utf-8") as f:
+                build_content = f.read()
+            build_b64 = b64mod.b64encode(build_content.encode("utf-8")).decode("utf-8")
+            build_sha = None
+            try:
+                sha_resp = urllib.request.urlopen(
+                    urllib.request.Request(f"{api_base}/build.py", headers=headers),
+                    timeout=15, context=ctx
+                )
+                build_sha = json.loads(sha_resp.read().decode())["sha"]
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    raise ConnectionError(f"Failed to get build.py SHA ({e.code}): {e.read().decode('utf-8', errors='replace')[:300]}")
+            except Exception:
+                pass
+            payload = {"message": f"Update build.py to v{new_ver}", "content": build_b64}
+            if build_sha:
+                payload["sha"] = build_sha
+            req = urllib.request.Request(
+                f"{api_base}/build.py",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={**headers, "Content-Type": "application/json"},
+                method="PUT",
+            )
+            try:
+                urllib.request.urlopen(req, timeout=30, context=ctx)
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
+                raise ConnectionError(f"build.py push failed ({e.code}): {body[:500]}")
+
+            QMessageBox.information(self, "Pushed!",
+                f"Updated to v{new_ver}!\n\n"
+                f"Repo: {repo}\n"
+                f"Date: {new_date}\n"
+                f"Changelog: {changelog}")
+            self.status_bar.showMessage(f"Pushed v{new_ver} to GitHub!", 5000)
+        except Exception as e:
+            QMessageBox.warning(self, "Push Error", f"Failed to push update:\n{e}")
+            self.status_bar.showMessage("Push failed!", 5000)
+        finally:
+            self.btn_push_update.setEnabled(True)
+            self.btn_push_update.setText("Push Update")
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
