@@ -1847,6 +1847,7 @@ class MainWindow(QMainWindow):
                 f"Repo: {repo}\n"
                 f"Date: {new_date}\n"
                 f"Changelog: {changelog}")
+            self.lbl_version.setText(f"v{new_ver}")
             self.status_bar.showMessage(f"Pushed v{new_ver} to GitHub!", 5000)
         except Exception as e:
             QMessageBox.warning(self, "Push Error", f"Failed to push update:\n{e}")
