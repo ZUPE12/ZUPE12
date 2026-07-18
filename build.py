@@ -954,6 +954,10 @@ class MainWindow(QMainWindow):
         self.process_thread = None
         self.ai_thread = None
         self.presets = load_presets()
+        global APP_VERSION
+        saved_ver = self.presets.get("app_version", "")
+        if saved_ver:
+            APP_VERSION = saved_ver
         self.dark_mode = self.presets.get("dark_mode", False)
         self._setup_ui()
         self._setup_shortcuts()
@@ -1848,6 +1852,8 @@ class MainWindow(QMainWindow):
                 f"Date: {new_date}\n"
                 f"Changelog: {changelog}")
             self.lbl_version.setText(f"v{new_ver}")
+            self.presets["app_version"] = new_ver
+            save_presets_to_file(self.presets)
             self.status_bar.showMessage(f"Pushed v{new_ver} to GitHub!", 5000)
         except Exception as e:
             QMessageBox.warning(self, "Push Error", f"Failed to push update:\n{e}")
